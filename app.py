@@ -42,9 +42,12 @@ def init_db():
                           weight VARCHAR(50))''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS production_data_long (
                           sr_no VARCHAR(50),
-                          id INT,
+                          id VARCHAR(50),
                           metre INT,
-                          weight VARCHAR(50))''')
+                          weight VARCHAR(50),
+                          date VARCHAR(10),
+                          machine_no VARCHAR(10),
+                          worker_id VARCHAR(10))''')
         conn.close()
 
 # Function to add data to the database
@@ -62,21 +65,36 @@ def add_data_to_db(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id
         except mysql.connector.IntegrityError:
             st.error(f'SR No. {sr_no} already exists. Please use a unique SR No.')
         conn.close()
+        # Update session state with new data
+        if 'data' not in st.session_state:
+            st.session_state['data'] = []
+        st.session_state['data'].insert(0, [sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight])
 
 # Function to transform and insert data into the long format table
 def transform_and_insert_data_long(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight):
+    def parse_id(id_value):
+        date_part = id_value[:8]
+        machine_no_part = id_value[8:11]
+        worker_id_part = id_value[-4:]
+        
+        # Convert date_part from YYYYMMDD to DD-MM-YYYY
+        date_converted = f"{date_part[:2]}-{date_part[2:4]}-{date_part[4:8]}"
+        
+        return date_converted, machine_no_part, worker_id_part
+
     transformed_data = [
-        (sr_no, id1, metre1, weight),
-        (sr_no, id2, metre2, weight),
-        (sr_no, id3, metre3, weight),
-        (sr_no, id4, metre4, weight),
-        (sr_no, id5, metre5, weight),
+        (sr_no, id1, metre1, weight, *parse_id(id1)),
+        (sr_no, id2, metre2, weight, *parse_id(id2)),
+        (sr_no, id3, metre3, weight, *parse_id(id3)),
+        (sr_no, id4, metre4, weight, *parse_id(id4)),
+        (sr_no, id5, metre5, weight, *parse_id(id5)),
     ]
+    
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight) "
-                        "VALUES (%s, %s, %s, %s)")
+        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)")
         for row in transformed_data:
             cursor.execute(insert_query, row)
         conn.commit()
@@ -88,7 +106,7 @@ def get_data_from_db():
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM production_data ORDER BY sr_no DESC')
+        cursor.execute('SELECT * FROM production_data')
         data = cursor.fetchall()
         conn.close()
         return data
@@ -152,12 +170,14 @@ elif page == 'add_production':
     weight = st.text_input('WEIGHT')
     if st.button('SUBMIT'):
         add_data_to_db(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight)
-
+    
     # Display the data below the form
-    data = get_data_from_db()
-    if data:
+    if 'data' not in st.session_state:
+        st.session_state['data'] = get_data_from_db()
+    
+    if st.session_state['data']:
         st.header('Production Data')
-        df = pd.DataFrame(data, columns=['SR No.', 'ID1', 'METRE1', 'ID2', 'METRE2', 'ID3', 'METRE3', 'ID4', 'METRE4', 'ID5', 'METRE5', 'WEIGHT'])
+        df = pd.DataFrame(st.session_state['data'], columns=['SR No.', 'ID1', 'METRE1', 'ID2', 'METRE2', 'ID3', 'METRE3', 'ID4', 'METRE4', 'ID5', 'METRE5', 'WEIGHT'])
         st.dataframe(df)
 
 elif page == 'view_data':
@@ -183,7 +203,5 @@ elif page == 'manipulation':
 
 elif page == 'product_data':
     st.header('Product Data')
-    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT'])
+    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.', 'WORKER ID'])
     st.dataframe(df)
-
-
