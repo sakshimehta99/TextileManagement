@@ -47,7 +47,14 @@ def init_db():
                           weight VARCHAR(50),
                           date VARCHAR(10),
                           machine_no VARCHAR(10),
-                          worker_id VARCHAR(10))''')
+                          worker_id VARCHAR(10),
+                          metre_count INT)''')  # Added metre_count column
+        cursor.execute('''CREATE TABLE IF NOT EXISTS daily_stock_data (
+                          sr_no VARCHAR(50) PRIMARY KEY,
+                          metre INT,
+                          weight VARCHAR(50),
+                          date VARCHAR(10),
+                          machine_no VARCHAR(10))''')
         conn.close()
 
 # Function to add data to the database
@@ -93,10 +100,23 @@ def transform_and_insert_data_long(sr_no, id1, metre1, id2, metre2, id3, metre3,
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s)")
+        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id, metre_count) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)")
+        
+        # Get the existing data for the given sr_no to compute metre_count
+        cursor.execute('SELECT sr_no, metre FROM production_data_long WHERE sr_no = %s', (sr_no,))
+        existing_metre_data = cursor.fetchall()
+        
+        previous_metre = 0.0
         for row in transformed_data:
-            cursor.execute(insert_query, row)
+            metre = float(row[2])
+            if not existing_metre_data and previous_metre == 0:
+                metre_count = metre  # First entry for the sr_no
+            else:
+                metre_count = metre - previous_metre
+            previous_metre = metre
+            cursor.execute(insert_query, row + (metre_count,))
+        
         conn.commit()
         cursor.close()
         conn.close()
@@ -117,7 +137,51 @@ def get_long_format_data():
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM production_data_long ORDER BY sr_no DESC')
+        cursor.execute('SELECT * FROM production_data_long')
+        data = cursor.fetchall()
+        conn.close()
+        return data
+    return []
+
+# Function to transform and store daily stock data
+# Function to transform and store daily stock data using PARTITION BY and ORDER BY
+def transform_and_store_daily_stock_data():
+    conn = connect_db()
+    if conn is not None:
+        cursor = conn.cursor()
+
+        # Use window function to get the last record for each sr_no
+        cursor.execute('''
+            SELECT DISTINCT
+                sr_no,
+                FIRST_VALUE(metre) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS metre,
+                FIRST_VALUE(weight) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS weight,
+                FIRST_VALUE(date) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS date,
+                FIRST_VALUE(machine_no) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS machine_no
+            FROM production_data_long
+        ''')
+        data = cursor.fetchall()
+        cursor.close()
+
+        insert_query = ("INSERT INTO daily_stock_data (sr_no, metre, weight, date, machine_no) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON DUPLICATE KEY UPDATE metre=%s, weight=%s, date=%s, machine_no=%s")
+
+        for row in data:
+            sr_no, metre, weight, date, machine_no = row
+            cursor = conn.cursor()
+            cursor.execute(insert_query, (sr_no, metre, weight, date, machine_no, metre, weight, date, machine_no))
+            conn.commit()
+            cursor.close()
+        conn.close()
+
+
+# Function to get daily stock data from the database
+def get_daily_stock_data():
+    conn = connect_db()
+    if conn is not None:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM daily_stock_data')
         data = cursor.fetchall()
         conn.close()
         return data
@@ -137,6 +201,7 @@ def render_navbar():
     st.sidebar.button('DELIVERY REPORT', on_click=navigate_to, args=('delivery_report',))
     st.sidebar.button('MANIPULATION', on_click=navigate_to, args=('manipulation',))
     st.sidebar.button('PRODUCT DATA', on_click=navigate_to, args=('product_data',))
+    st.sidebar.button('DAILY STOCK DATA', on_click=navigate_to, args=('daily_stock_data',))
 
 # Initialize the database
 init_db()
@@ -203,5 +268,16 @@ elif page == 'manipulation':
 
 elif page == 'product_data':
     st.header('Product Data')
-    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.', 'WORKER ID'])
+    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.', 'WORKER ID', 'METRE COUNT'])
     st.dataframe(df)
+
+elif page == 'daily_stock_data':
+    st.header('Daily Stock Data')
+    transform_and_store_daily_stock_data()
+    data = get_daily_stock_data()
+    if data:
+        df = pd.DataFrame(data, columns=['SR No.', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.'])
+        st.dataframe(df)
+    else:
+        st.write('No data available.')
+
