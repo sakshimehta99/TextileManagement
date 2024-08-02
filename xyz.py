@@ -1,30 +1,4 @@
-            host="127.0.0.1",  # Replace with your MySQL host
-            user="root",  # Replace with your MySQL username
-            password="S@kshi27",  # Replace with your MySQL password
-            database="textile_db"  # Replace with your database name
-
-conn = connect_db()
-    if conn is not None:
-        cursor = conn.cursor()
-        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id, metre_count) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)")
-        
-        # Get the existing data for the given sr_no to compute metre_count
-        cursor.execute('SELECT metre FROM production_data_long WHERE sr_no = %s ORDER BY id', (sr_no,))
-        existing_metre_data = cursor.fetchall()
-        previous_metre = 0 if not existing_metre_data else existing_metre_data[-1][0]
-        
-        for row in transformed_data:
-            metre = row[2]
-            metre_count = metre if not existing_metre_data else metre - previous_metre
-            previous_metre = metre
-            cursor.execute(insert_query, row + (metre_count,))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-            import streamlit as st
+import streamlit as st
 import pandas as pd
 import mysql.connector
 from mysql.connector import errorcode
@@ -73,7 +47,14 @@ def init_db():
                           weight VARCHAR(50),
                           date VARCHAR(10),
                           machine_no VARCHAR(10),
-                          worker_id VARCHAR(10))''')
+                          worker_id VARCHAR(10),
+                          metre_count INT)''')  # Added metre_count column
+        cursor.execute('''CREATE TABLE IF NOT EXISTS daily_stock_data (
+                          sr_no VARCHAR(50) PRIMARY KEY,
+                          metre INT,
+                          weight VARCHAR(50),
+                          date VARCHAR(10),
+                          machine_no VARCHAR(10))''')
         conn.close()
 
 # Function to add data to the database
@@ -88,9 +69,14 @@ def add_data_to_db(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id
             conn.commit()
             st.success('Data added successfully!')
             transform_and_insert_data_long(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight)
+            transform_and_store_daily_stock_data()
         except mysql.connector.IntegrityError:
             st.error(f'SR No. {sr_no} already exists. Please use a unique SR No.')
         conn.close()
+        # Update session state with new data
+        if 'data' not in st.session_state:
+            st.session_state['data'] = []
+        st.session_state['data'].insert(0, [sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight])
 
 # Function to transform and insert data into the long format table
 def transform_and_insert_data_long(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight):
@@ -115,56 +101,113 @@ def transform_and_insert_data_long(sr_no, id1, metre1, id2, metre2, id3, metre3,
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s)")
+        insert_query = ("INSERT INTO production_data_long (sr_no, id, metre, weight, date, machine_no, worker_id, metre_count) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)")
+        
+        # Get the existing data for the given sr_no to compute metre_count
+        cursor.execute('SELECT sr_no, metre FROM production_data_long WHERE sr_no = %s', (sr_no,))
+        existing_metre_data = cursor.fetchall()
+        
+        previous_metre = 0.0
         for row in transformed_data:
-            cursor.execute(insert_query, row)
+            metre = float(row[2])
+            if not existing_metre_data and previous_metre == 0:
+                metre_count = metre  # First entry for the sr_no
+            else:
+                metre_count = metre - previous_metre
+            previous_metre = metre
+            cursor.execute(insert_query, row + (metre_count,))
+        
         conn.commit()
         cursor.close()
         conn.close()
 
 # Function to get data from the database
 def get_data_from_db():
-    conn = connect_db()
-    if conn is not None:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM production_data ORDER BY sr_no DESC')
-        data = cursor.fetchall()
-        conn.close()
-        return data
-    return []
+    return fetch_data_from_db('SELECT * FROM production_data')
 
 # Function to get long format data from the database
 def get_long_format_data():
+    return fetch_data_from_db('SELECT * FROM production_data_long')
+
+# General function to fetch data from the database
+def fetch_data_from_db(query):
     conn = connect_db()
     if conn is not None:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM production_data_long ORDER BY sr_no DESC')
-        data = cursor.fetchall()
-        conn.close()
-        return data
+        try:
+            cursor.execute(query)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+            conn.close()
     return []
+
+# Function to transform and store daily stock data
+# Function to transform and store daily stock data using PARTITION BY and ORDER BY
+def transform_and_store_daily_stock_data():
+    conn = connect_db()
+    if conn is not None:
+        cursor = conn.cursor()
+
+        # Use window function to get the last record for each sr_no
+        cursor.execute('''
+            SELECT DISTINCT
+                sr_no,
+                FIRST_VALUE(metre) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS metre,
+                FIRST_VALUE(weight) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS weight,
+                FIRST_VALUE(date) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS date,
+                FIRST_VALUE(machine_no) OVER (PARTITION BY sr_no ORDER BY metre DESC) AS machine_no
+            FROM production_data_long
+        ''')
+        data = cursor.fetchall()
+        cursor.close()
+
+        insert_query = ("INSERT INTO daily_stock_data (sr_no, metre, weight, date, machine_no) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON DUPLICATE KEY UPDATE metre=%s, weight=%s, date=%s, machine_no=%s")
+
+        for row in data:
+            sr_no, metre, weight, date, machine_no = row
+            cursor = conn.cursor()
+            cursor.execute(insert_query, (sr_no, metre, weight, date, machine_no, metre, weight, date, machine_no))
+            conn.commit()
+            cursor.close()
+        conn.close()
+
+
+# Function to get daily stock data from the database
+def get_daily_stock_data():
+    return fetch_data_from_db('SELECT * FROM daily_stock_data')
 
 # Function to handle page navigation
 def navigate_to(page):
     st.session_state['page'] = page
 
+# # Function to render the navigation bar
+# def render_navbar():
+#     st.sidebar.title("Navigation")
+#     st.sidebar.button('Home', on_click=navigate_to, args=('home',))
+#     st.sidebar.button('ADD PRODUCTION', on_click=navigate_to, args=('add_production',))
+#     st.sidebar.button('VIEW DATA', on_click=navigate_to, args=('view_data',))
+#     st.sidebar.button('MAKE BILL', on_click=navigate_to, args=('make_bill',))
+#     st.sidebar.button('DELIVERY REPORT', on_click=navigate_to, args=('delivery_report',))
+#     st.sidebar.button('MANIPULATION', on_click=navigate_to, args=('manipulation',))
+#     st.sidebar.button('PRODUCT DATA', on_click=navigate_to, args=('product_data',))
+#     st.sidebar.button('DAILY STOCK DATA', on_click=navigate_to, args=('daily_stock_data',))
+
 # Function to render the navigation bar
 def render_navbar():
     st.sidebar.title("Navigation")
-    st.sidebar.button('Home', on_click=navigate_to, args=('home',))
-    st.sidebar.button('ADD PRODUCTION', on_click=navigate_to, args=('add_production',))
-    st.sidebar.button('VIEW DATA', on_click=navigate_to, args=('view_data',))
-    st.sidebar.button('MAKE BILL', on_click=navigate_to, args=('make_bill',))
-    st.sidebar.button('DELIVERY REPORT', on_click=navigate_to, args=('delivery_report',))
-    st.sidebar.button('MANIPULATION', on_click=navigate_to, args=('manipulation',))
-    st.sidebar.button('PRODUCT DATA', on_click=navigate_to, args=('product_data',))
+    pages = ['Home', 'ADD PRODUCTION', 'VIEW DATA', 'MAKE BILL', 'DELIVERY REPORT', 'MANIPULATION', 'PRODUCT DATA', 'DAILY STOCK DATA']
+    for page in pages:
+        st.sidebar.button(page, on_click=navigate_to, args=(page.lower().replace(' ', '_'),))
 
 # Initialize the database
 init_db()
 
 # Render navigation bar
-render_navbar()
+render_navbar() 
 
 # Render content based on the current page
 page = st.session_state.get('page', 'home')
@@ -192,12 +235,14 @@ elif page == 'add_production':
     weight = st.text_input('WEIGHT')
     if st.button('SUBMIT'):
         add_data_to_db(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight)
-
+    
     # Display the data below the form
-    data = get_data_from_db()
-    if data:
+    if 'data' not in st.session_state:
+        st.session_state['data'] = get_data_from_db()
+    
+    if st.session_state['data']:
         st.header('Production Data')
-        df = pd.DataFrame(data, columns=['SR No.', 'ID1', 'METRE1', 'ID2', 'METRE2', 'ID3', 'METRE3', 'ID4', 'METRE4', 'ID5', 'METRE5', 'WEIGHT'])
+        df = pd.DataFrame(st.session_state['data'], columns=['SR No.', 'ID1', 'METRE1', 'ID2', 'METRE2', 'ID3', 'METRE3', 'ID4', 'METRE4', 'ID5', 'METRE5', 'WEIGHT'])
         st.dataframe(df)
 
 elif page == 'view_data':
@@ -223,5 +268,16 @@ elif page == 'manipulation':
 
 elif page == 'product_data':
     st.header('Product Data')
-    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.', 'WORKER ID'])
+    df = pd.DataFrame(get_long_format_data(), columns=['SR No.', 'ID', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.', 'WORKER ID', 'METRE COUNT'])
     st.dataframe(df)
+
+elif page == 'daily_stock_data':
+    st.header('Daily Stock Data')
+    # transform_and_store_daily_stock_data()
+    data = get_daily_stock_data()
+    if data:
+        df = pd.DataFrame(data, columns=['SR No.', 'METRE', 'WEIGHT', 'DATE', 'MACHINE NO.'])
+        st.dataframe(df)
+    else:
+        st.write('No data available.')
+
