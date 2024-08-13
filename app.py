@@ -33,6 +33,16 @@ elif page == 'add_production':
     weight = st.text_input('WEIGHT')
     if st.button('SUBMIT'):
         add_data_to_db(sr_no, id1, metre1, id2, metre2, id3, metre3, id4, metre4, id5, metre5, weight)
+
+    # Display the data below the form
+    if 'data' not in st.session_state:
+        st.session_state['data'] = get_data_from_db()
+    
+    if st.session_state['data']:
+        st.header('Production Data')
+        df = pd.DataFrame(st.session_state['data'], columns=['SR No.', 'ID1', 'METRE1', 'ID2', 'METRE2', 'ID3', 'METRE3', 'ID4', 'METRE4', 'ID5', 'METRE5', 'WEIGHT'])
+        st.dataframe(df)
+
 elif page == 'view_data':
     st.title('View Data')
     data = get_data_from_db()
